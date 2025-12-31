@@ -2,6 +2,12 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { z } from "zod";
 import { hash } from "bcryptjs";
+import { sendWelcomeEmail } from "../lib/email.js";
+
+const generatePassword = (length: number = 12): string => {
+    const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*";
+    return Array.from({ length }, () => charset.charAt(Math.floor(Math.random() * charset.length))).join("");
+};
 
 const userCreateSchema = z.object({
     name: z.string().min(1, "Le nom est requis"),
@@ -41,7 +47,8 @@ export const usersRoutes = async (app: FastifyInstance) => {
                 isRootAdmin: u.is_root_admin,
                 department: u.department,
                 customRoleId: u.custom_role_id,
-                customRole: u.permission_roles,
+                customRoleName: u.permission_roles?.name,
+                customRoleColor: u.permission_roles?.color,
                 lastLogin: u.last_login,
                 createdAt: u.created_at,
                 updatedAt: u.updated_at,
@@ -122,7 +129,21 @@ export const usersRoutes = async (app: FastifyInstance) => {
             }
         }
 
-        const passwordHash = password ? await hash(password, 10) : undefined;
+        const generatedPassword = password ?? generatePassword();
+
+        if (email?.trim()) {
+            console.log(`[Users] Tentative d'envoi d'email de bienvenue à ${email.trim()}...`);
+            const emailSent = await sendWelcomeEmail(email.trim(), name.trim(), generatedPassword);
+            if (!emailSent) {
+                console.error(`[Users] Échec de l'envoi d'email à ${email.trim()} - création utilisateur annulée`);
+                return reply.status(500).send({
+                    error: "Impossible d'envoyer l'email de bienvenue. Vérifiez la configuration SMTP.",
+                });
+            }
+            console.log(`[Users] Email envoyé avec succès à ${email.trim()}`);
+        }
+
+        const passwordHash = await hash(generatedPassword, 10);
 
         const user = await prisma.users.create({
             data: {
@@ -132,7 +153,7 @@ export const usersRoutes = async (app: FastifyInstance) => {
                 custom_role_id: customRoleId ?? null,
                 department: department?.trim() || null,
                 password_hash: passwordHash,
-                must_change_password: !!password,
+                must_change_password: true,
             },
         });
 
@@ -191,7 +212,31 @@ export const usersRoutes = async (app: FastifyInstance) => {
             }
         }
 
-        const passwordHash = password ? await hash(password, 10) : undefined;
+        const emailChanged =
+            email !== undefined &&
+            email.trim() !== "" &&
+            email.trim() !== existing.email;
+
+        const newPassword = emailChanged ? generatePassword() : undefined;
+
+        if (emailChanged && newPassword) {
+            console.log(`[Users] Email modifié pour ${name ?? existing.name}, envoi d'un nouveau mot de passe...`);
+            const emailSent = await sendWelcomeEmail(
+                email.trim(),
+                name?.trim() ?? existing.name,
+                newPassword,
+            );
+            if (!emailSent) {
+                console.error(`[Users] Échec de l'envoi d'email - modification annulée`);
+                return reply.status(500).send({
+                    error: "Impossible d'envoyer l'email avec le nouveau mot de passe. Modification annulée.",
+                });
+            }
+        }
+
+        const passwordHash = newPassword
+            ? await hash(newPassword, 10)
+            : (password ? await hash(password, 10) : undefined);
 
         const user = await prisma.users.update({
             where: { id },
@@ -202,7 +247,7 @@ export const usersRoutes = async (app: FastifyInstance) => {
                 ...(customRoleId !== undefined ? { custom_role_id: customRoleId } : {}),
                 ...(department !== undefined ? { department: department.trim() || null } : {}),
                 ...(isActive !== undefined ? { is_active: isActive } : {}),
-                ...(passwordHash !== undefined ? { password_hash: passwordHash } : {}),
+                ...(passwordHash !== undefined ? { password_hash: passwordHash, must_change_password: true } : {}),
             },
         });
 
@@ -215,6 +260,7 @@ export const usersRoutes = async (app: FastifyInstance) => {
             customRoleId: user.custom_role_id,
             department: user.department,
             updatedAt: user.updated_at,
+            emailSent: emailChanged,
         });
     });
 

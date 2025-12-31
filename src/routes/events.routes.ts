@@ -1,64 +1,20 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
-import { z } from "zod";
+import { eventCreateSchema, eventUpdateSchema } from "../schemas/events.schema.js";
+import {
+    repeatTypeMap,
+    alertMinutesMap,
+    emailAlertDaysMap,
+    parseTags,
+    generateRRule,
+    findOrCreateCategory,
+    findOrCreateSubcategory,
+    findOrCreatePlatform,
+    resolveResponsibleId
+} from "../utils/event.utils.js";
 
 type JwtPayload = {
     userId: number;
-};
-
-const eventCreateSchema = z.object({
-    title: z.string().min(1, "Le titre est requis"),
-    description: z.string().optional(),
-    location: z.string().optional(),
-    startDate: z.string().optional(),
-    endDate: z.string().optional(),
-    allDay: z.boolean().optional().default(true),
-    category: z.string().optional(),
-    subcategory: z.string().optional(),
-    platform: z.string().optional(),
-    responsible: z.union([z.number(), z.string()]).optional(),
-    repeat: z.string().optional(),
-    repeatEndDate: z.string().optional(),
-    alert: z.string().optional(),
-    emailAlert: z.string().optional(),
-    status: z.string().optional(),
-    isUnplanned: z.boolean().optional(),
-    tags: z.string().optional(),
-});
-
-const eventUpdateSchema = eventCreateSchema.partial();
-
-const repeatTypeMap: Record<string, string> = {
-    Jamais: "none",
-    "Chaque semaine": "weekly",
-    "Chaque mois": "monthly",
-    "Chaque trimestre": "quarterly",
-    "Chaque semestre": "semestrial",
-    "Chaque année": "yearly",
-};
-
-const alertMinutesMap: Record<string, number | null> = {
-    Aucune: null,
-    "15 minutes avant": 15,
-    "30 minutes avant": 30,
-    "1 heure avant": 60,
-    "2 heures avant": 120,
-    "1 jour avant": 1440,
-};
-
-const emailAlertDaysMap: Record<string, number | null> = {
-    Aucune: null,
-    "1 jour ouvrable avant": 1,
-    "2 jours ouvrables avant": 2,
-    "3 jours ouvrables avant": 3,
-    "5 jours ouvrables avant": 5,
-    "1 semaine ouvrable avant": 5,
-    "2 semaines ouvrables avant": 10,
-};
-
-const parseHashtags = (input: string): string[] => {
-    const matches = input.match(/#[\wÀ-ÿ]+/g);
-    return matches ? matches.map((tag) => tag.slice(1)) : [];
 };
 
 export const eventsRoutes = async (app: FastifyInstance) => {
@@ -227,56 +183,10 @@ export const eventsRoutes = async (app: FastifyInstance) => {
         const data = result.data;
         const isUnplanned = data.isUnplanned ?? false;
 
-        let categoryId: number | null = null;
-        if (data.category?.trim()) {
-            const category = await prisma.event_categories.findFirst({
-                where: { name: data.category.trim() },
-            });
-            if (category) {
-                categoryId = category.id;
-            } else {
-                const newCategory = await prisma.event_categories.create({
-                    data: { name: data.category.trim(), color: "#3B82F6" },
-                });
-                categoryId = newCategory.id;
-            }
-        }
-
-        let subcategoryId: number | null = null;
-        if (data.subcategory?.trim() && categoryId) {
-            const subcategory = await prisma.event_subcategories.findFirst({
-                where: { name: data.subcategory.trim(), category_id: categoryId },
-            });
-            if (subcategory) {
-                subcategoryId = subcategory.id;
-            }
-        }
-
-        let platformId: number | null = null;
-        if (data.platform?.trim()) {
-            const platform = await prisma.event_platforms.findFirst({
-                where: { name: data.platform.trim() },
-            });
-            if (platform) {
-                platformId = platform.id;
-            } else {
-                const newPlatform = await prisma.event_platforms.create({
-                    data: { name: data.platform.trim(), color: "#3B82F6" },
-                });
-                platformId = newPlatform.id;
-            }
-        }
-
-        let responsibleId: number | null = null;
-        if (data.responsible) {
-            const respId = typeof data.responsible === "string" ? parseInt(data.responsible, 10) : data.responsible;
-            if (!isNaN(respId)) {
-                const user = await prisma.users.findUnique({ where: { id: respId } });
-                if (user) {
-                    responsibleId = user.id;
-                }
-            }
-        }
+        const categoryId = await findOrCreateCategory(data.category);
+        const subcategoryId = await findOrCreateSubcategory(data.subcategory, categoryId);
+        const platformId = await findOrCreatePlatform(data.platform);
+        const responsibleId = await resolveResponsibleId(data.responsible);
 
         const repeatType = data.repeat ? (repeatTypeMap[data.repeat] ?? "none") : "none";
         const alertMinutes = data.alert ? alertMinutesMap[data.alert] ?? null : null;
@@ -285,6 +195,8 @@ export const eventsRoutes = async (app: FastifyInstance) => {
         const startDateTime = isUnplanned || !data.startDate ? null : new Date(data.startDate);
         const endDateTime = isUnplanned || !data.endDate ? null : new Date(data.endDate);
         const repeatEndDateTime = data.repeatEndDate ? new Date(data.repeatEndDate) : null;
+
+        const rrule = generateRRule(repeatType, repeatEndDateTime);
 
         const event = await prisma.events.create({
             data: {
@@ -300,6 +212,7 @@ export const eventsRoutes = async (app: FastifyInstance) => {
                 responsible_id: responsibleId,
                 repeat_type: repeatType as "none" | "weekly" | "monthly" | "quarterly" | "semestrial" | "yearly",
                 repeat_end_date: repeatEndDateTime,
+                rrule: rrule,
                 alert_minutes: alertMinutes,
                 email_alert_working_days: emailAlertDays,
                 status: data.status?.trim() || (isUnplanned ? "Non planifié" : "Planifié"),
@@ -307,10 +220,11 @@ export const eventsRoutes = async (app: FastifyInstance) => {
         });
 
         if (data.tags) {
-            const tags = parseHashtags(data.tags);
+            const tags = parseTags(data.tags);
             if (tags.length > 0) {
                 await prisma.event_tags.createMany({
                     data: tags.map((tag) => ({ event_id: event.id, tag })),
+                    skipDuplicates: true,
                 });
             }
         }
@@ -365,33 +279,13 @@ export const eventsRoutes = async (app: FastifyInstance) => {
         const data = result.data;
         const updateData: Record<string, unknown> = {};
 
-        if (data.title !== undefined) {
-            updateData.title = data.title.trim();
-        }
-
-        if (data.description !== undefined) {
-            updateData.description = data.description.trim() || null;
-        }
-
-        if (data.location !== undefined) {
-            updateData.location = data.location.trim() || null;
-        }
-
-        if (data.startDate !== undefined) {
-            updateData.start = data.startDate ? new Date(data.startDate) : null;
-        }
-
-        if (data.endDate !== undefined) {
-            updateData.end = data.endDate ? new Date(data.endDate) : null;
-        }
-
-        if (data.allDay !== undefined) {
-            updateData.all_day = data.allDay;
-        }
-
-        if (data.status !== undefined) {
-            updateData.status = data.status.trim();
-        }
+        if (data.title !== undefined) updateData.title = data.title.trim();
+        if (data.description !== undefined) updateData.description = data.description.trim() || null;
+        if (data.location !== undefined) updateData.location = data.location.trim() || null;
+        if (data.startDate !== undefined) updateData.start = data.startDate ? new Date(data.startDate) : null;
+        if (data.endDate !== undefined) updateData.end = data.endDate ? new Date(data.endDate) : null;
+        if (data.allDay !== undefined) updateData.all_day = data.allDay;
+        if (data.status !== undefined) updateData.status = data.status.trim();
 
         if (data.repeat !== undefined) {
             updateData.repeat_type = repeatTypeMap[data.repeat] ?? "none";
@@ -399,6 +293,18 @@ export const eventsRoutes = async (app: FastifyInstance) => {
 
         if (data.repeatEndDate !== undefined) {
             updateData.repeat_end_date = data.repeatEndDate ? new Date(data.repeatEndDate) : null;
+        }
+
+        if (data.repeat !== undefined || data.repeatEndDate !== undefined) {
+            const currentRepeatType = updateData.repeat_type !== undefined
+                ? (updateData.repeat_type as string)
+                : existing.repeat_type;
+
+            const currentRepeatEndDate = updateData.repeat_end_date !== undefined
+                ? (updateData.repeat_end_date as Date | null)
+                : existing.repeat_end_date;
+
+            updateData.rrule = generateRRule(currentRepeatType || "none", currentRepeatEndDate);
         }
 
         if (data.alert !== undefined) {
@@ -410,38 +316,23 @@ export const eventsRoutes = async (app: FastifyInstance) => {
         }
 
         if (data.category !== undefined) {
-            if (data.category.trim()) {
-                const category = await prisma.event_categories.findFirst({
-                    where: { name: data.category.trim() },
-                });
-                updateData.category_id = category?.id ?? null;
-            } else {
-                updateData.category_id = null;
-            }
+            updateData.category_id = await findOrCreateCategory(data.category);
+        }
+
+        if (data.subcategory !== undefined) {
+            const effectiveCategoryId = updateData.category_id !== undefined
+                ? (updateData.category_id as number | null)
+                : existing.category_id;
+
+            updateData.subcategory_id = await findOrCreateSubcategory(data.subcategory, effectiveCategoryId);
         }
 
         if (data.platform !== undefined) {
-            if (data.platform.trim()) {
-                const platform = await prisma.event_platforms.findFirst({
-                    where: { name: data.platform.trim() },
-                });
-                updateData.platform_id = platform?.id ?? null;
-            } else {
-                updateData.platform_id = null;
-            }
+            updateData.platform_id = await findOrCreatePlatform(data.platform);
         }
 
         if (data.responsible !== undefined) {
-            if (data.responsible) {
-                const respId =
-                    typeof data.responsible === "string" ? parseInt(data.responsible, 10) : data.responsible;
-                if (!isNaN(respId)) {
-                    const user = await prisma.users.findUnique({ where: { id: respId } });
-                    updateData.responsible_id = user?.id ?? null;
-                }
-            } else {
-                updateData.responsible_id = null;
-            }
+            updateData.responsible_id = await resolveResponsibleId(data.responsible);
         }
 
         const event = await prisma.events.update({
@@ -452,10 +343,11 @@ export const eventsRoutes = async (app: FastifyInstance) => {
         if (data.tags !== undefined) {
             await prisma.event_tags.deleteMany({ where: { event_id: id } });
 
-            const tags = parseHashtags(data.tags);
+            const tags = parseTags(data.tags);
             if (tags.length > 0) {
                 await prisma.event_tags.createMany({
                     data: tags.map((tag) => ({ event_id: id, tag })),
+                    skipDuplicates: true,
                 });
             }
         }
@@ -516,8 +408,8 @@ export const eventsRoutes = async (app: FastifyInstance) => {
             orderBy: { performed_at: "desc" },
         });
 
-        return reply.send(
-            history.map((h) => ({
+        return reply.send({
+            history: history.map((h) => ({
                 id: h.id,
                 eventId: h.event_id,
                 action: h.action,
@@ -527,6 +419,128 @@ export const eventsRoutes = async (app: FastifyInstance) => {
                 diff: h.diff,
                 metadata: h.metadata,
             })),
-        );
+        });
+    });
+
+    app.get("/:id/attachments", async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+        const id = parseInt(request.params.id, 10);
+        if (isNaN(id)) return reply.status(400).send({ error: "ID invalide" });
+
+        const attachments = await prisma.event_attachments.findMany({
+            where: { event_id: id },
+            select: {
+                id: true,
+                event_id: true,
+                file_name: true,
+                file_size: true,
+                mime_type: true,
+                created_at: true,
+            },
+        });
+
+        return reply.send({
+            attachments: attachments.map((a) => ({
+                id: a.id,
+                eventId: a.event_id,
+                fileName: a.file_name,
+                fileSize: a.file_size,
+                mimeType: a.mime_type,
+                createdAt: a.created_at,
+            })),
+        });
+    });
+
+    app.post("/:id/attachments", async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+        const id = parseInt(request.params.id, 10);
+        if (isNaN(id)) return reply.status(400).send({ error: "ID invalide" });
+
+        const event = await prisma.events.findUnique({ where: { id } });
+        if (!event) return reply.status(404).send({ error: "Événement non trouvé" });
+
+        const parts = request.parts();
+        const uploadedFiles = [];
+
+        for await (const part of parts) {
+            if (part.type === "file") {
+                const chunks: Buffer[] = [];
+                for await (const chunk of part.file) {
+                    chunks.push(chunk as Buffer);
+                }
+                const buffer = Buffer.concat(chunks);
+
+                const attachment = await prisma.event_attachments.create({
+                    data: {
+                        event_id: id,
+                        file_name: part.filename,
+                        mime_type: part.mimetype ?? "application/octet-stream",
+                        file_size: buffer.length,
+                        file_data: buffer,
+                    },
+                    select: {
+                        id: true,
+                        event_id: true,
+                        file_name: true,
+                        file_size: true,
+                        mime_type: true,
+                        created_at: true,
+                    },
+                });
+                uploadedFiles.push(attachment);
+            }
+        }
+
+        return reply.send({
+            message: "Fichiers uploadés",
+            attachments: uploadedFiles.map((a) => ({
+                id: a.id,
+                eventId: a.event_id,
+                fileName: a.file_name,
+                fileSize: a.file_size,
+                mimeType: a.mime_type,
+                createdAt: a.created_at,
+            })),
+        });
+    });
+
+    app.get("/:id/attachments/:attachmentId/download", async (request: FastifyRequest<{ Params: { id: string; attachmentId: string } }>, reply: FastifyReply) => {
+        const id = parseInt(request.params.id, 10);
+        const attachmentId = parseInt(request.params.attachmentId, 10);
+        if (isNaN(id) || isNaN(attachmentId)) return reply.status(400).send({ error: "ID invalide" });
+
+        const attachment = await prisma.event_attachments.findFirst({
+            where: { id: attachmentId, event_id: id },
+        });
+
+        if (!attachment || !attachment.file_data) {
+            return reply.status(404).send({ error: "Fichier non trouvé" });
+        }
+
+        reply.header("Content-Disposition", `attachment; filename="${attachment.file_name}"`);
+        reply.type(attachment.mime_type || "application/octet-stream");
+        return reply.send(attachment.file_data);
+    });
+
+    app.delete("/:id/attachments/:attachmentId", async (request: FastifyRequest<{ Params: { id: string; attachmentId: string } }>, reply: FastifyReply) => {
+        try {
+            await request.jwtVerify();
+        } catch {
+            return reply.status(401).send({ error: "Non authentifié" });
+        }
+
+        const id = parseInt(request.params.id, 10);
+        const attachmentId = parseInt(request.params.attachmentId, 10);
+        if (isNaN(id) || isNaN(attachmentId)) return reply.status(400).send({ error: "ID invalide" });
+
+        const attachment = await prisma.event_attachments.findFirst({
+            where: { id: attachmentId, event_id: id },
+        });
+
+        if (!attachment) {
+            return reply.status(404).send({ error: "Pièce jointe non trouvée" });
+        }
+
+        await prisma.event_attachments.delete({ where: { id: attachmentId } });
+
+        return reply.send({ message: "Pièce jointe supprimée" });
     });
 };

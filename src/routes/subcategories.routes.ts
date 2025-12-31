@@ -80,7 +80,7 @@ export const subcategoriesRoutes = async (app: FastifyInstance) => {
         }
 
         const existing = await prisma.event_subcategories.findFirst({
-            where: { name: name.trim(), category_id: categoryId },
+            where: { name: name.trim().toUpperCase(), category_id: categoryId },
         });
 
         if (existing) {
@@ -89,7 +89,7 @@ export const subcategoriesRoutes = async (app: FastifyInstance) => {
 
         const subcategory = await prisma.event_subcategories.create({
             data: {
-                name: name.trim(),
+                name: name.trim().toUpperCase(),
                 category_id: categoryId,
             },
         });
@@ -127,7 +127,7 @@ export const subcategoriesRoutes = async (app: FastifyInstance) => {
         }
 
         const duplicate = await prisma.event_subcategories.findFirst({
-            where: { name: name.trim(), category_id: existing.category_id, id: { not: id } },
+            where: { name: name.trim().toUpperCase(), category_id: existing.category_id, id: { not: id } },
         });
 
         if (duplicate) {
@@ -136,7 +136,7 @@ export const subcategoriesRoutes = async (app: FastifyInstance) => {
 
         const subcategory = await prisma.event_subcategories.update({
             where: { id },
-            data: { name: name.trim() },
+            data: { name: name.trim().toUpperCase() },
         });
 
         return reply.send({

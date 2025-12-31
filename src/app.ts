@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import jwt from "@fastify/jwt";
 
+import multipart from "@fastify/multipart";
 import { authRoutes } from "./routes/auth.routes.js";
 import { eventsRoutes } from "./routes/events.routes.js";
 import { categoriesRoutes } from "./routes/categories.routes.js";
@@ -26,6 +27,7 @@ const startServer = async () => {
     });
 
     await app.register(cookie);
+    await app.register(multipart);
 
     await app.register(jwt, {
         secret: process.env["JWT_SECRET"] ?? "default-secret-change-me",

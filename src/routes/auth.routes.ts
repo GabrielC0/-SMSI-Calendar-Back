@@ -107,6 +107,8 @@ export const authRoutes = async (app: FastifyInstance) => {
                 email: user.email,
                 role: user.role ?? "user",
                 customRoleId: user.custom_role_id,
+                customRoleName: user.permission_roles?.name,
+                customRoleColor: user.permission_roles?.color,
                 permissions,
             },
             token,
@@ -158,6 +160,8 @@ export const authRoutes = async (app: FastifyInstance) => {
                 email: user.email,
                 role: user.role ?? "user",
                 customRoleId: user.custom_role_id,
+                customRoleName: user.permission_roles?.name,
+                customRoleColor: user.permission_roles?.color,
                 permissions,
             },
         });

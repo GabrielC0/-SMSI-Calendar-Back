@@ -197,7 +197,7 @@ export const rolesRoutes = async (app: FastifyInstance) => {
             for (const [permType, hasPermission] of Object.entries(permissions)) {
                 await prisma.permission_role_permissions.upsert({
                     where: {
-                        unique_role_permission: { role_id: id, permission_type: permType },
+                        role_id_permission_type: { role_id: id, permission_type: permType },
                     },
                     update: { has_permission: hasPermission },
                     create: {

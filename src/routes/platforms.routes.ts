@@ -64,7 +64,7 @@ export const platformsRoutes = async (app: FastifyInstance) => {
         const { name, color } = result.data;
 
         const existing = await prisma.event_platforms.findFirst({
-            where: { name: name.trim() },
+            where: { name: name.trim().toUpperCase() },
         });
 
         if (existing) {
@@ -72,7 +72,7 @@ export const platformsRoutes = async (app: FastifyInstance) => {
         }
 
         const platform = await prisma.event_platforms.create({
-            data: { name: name.trim(), color },
+            data: { name: name.trim().toUpperCase(), color },
         });
 
         return reply.status(201).send({
@@ -108,7 +108,7 @@ export const platformsRoutes = async (app: FastifyInstance) => {
         }
 
         const duplicate = await prisma.event_platforms.findFirst({
-            where: { name: name.trim(), id: { not: id } },
+            where: { name: name.trim().toUpperCase(), id: { not: id } },
         });
 
         if (duplicate) {
@@ -117,7 +117,7 @@ export const platformsRoutes = async (app: FastifyInstance) => {
 
         const platform = await prisma.event_platforms.update({
             where: { id },
-            data: { name: name.trim(), color },
+            data: { name: name.trim().toUpperCase(), color },
         });
 
         return reply.send({
